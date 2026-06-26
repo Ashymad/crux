@@ -1,7 +1,7 @@
 FROM busybox AS build
 
 ARG CRUX_VERSION=3.8
-ARG CRUX_MIRROR=ftp://ftp.spline.inf.fu-berlin.de/pub/crux
+ARG CRUX_MIRROR=http://ftp.morpheus.net/pub/linux/crux/
 
 ENV CRUX_URL="$CRUX_MIRROR/crux-$CRUX_VERSION/iso/crux-$CRUX_VERSION.iso"
 
