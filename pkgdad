@@ -1,0 +1,146 @@
+#!/bin/sh
+
+VERSION=0.1
+
+set -e
+
+nl="$(printf '\nx')"
+nl="${nl%x}"
+
+pkgadd_args=""
+pkgs=""
+pkgdirs=""
+excluded=""
+chroot=""
+root=""
+config=""
+auto=0
+update=0
+
+help() {
+    echo "usage: $1 [options] <file/dir>..."
+    pkgadd --help | tail -n+2
+    echo "  -p, --chroot <path>  chroot to <path> before running pkgadd"
+    echo "  -e, --exclude <glob> exclude <glob> from installation, can be repeated"
+    echo "  -a, --auto           update if present, install otherwise"
+    echo "  -q, --query <pkg>    display installed package version"
+}
+
+version() {
+    echo "pkgdad (ashymad) $VERSION"
+    pkgadd -v
+}
+
+unchroot() {
+    if [ -z "$1" ]; then
+        echo "$2"
+    elif [ "$2" = "${2#$1}" ]; then
+        echo "pkgdad: file $2 is not in the chroot directory: $1" 1>&2
+        exit 1
+    else
+        echo "${2#$1}"
+    fi
+}
+
+parse_args() {
+    while :; do
+        case $1 in
+            -v|--version) version; exit 0; ;;
+            -h|--help) help "$0"; exit 0; ;;
+            -p|--chroot) chroot="$(readlink -f "$2")"; shift 2; ;;
+            -a|--auto) auto=1; shift; ;;
+            -e|--exclude) excluded="$excluded$2$nl"; shift 2; ;;
+            -r|--root) root="$(readlink -f "$2")"; shift 2; ;;
+            -c|--config) config="$(readlink -f "$2")"; shift 2; ;;
+            -u|--update) pkgadd_args="$pkgadd_args$1$nl"; update=1; shift; ;;
+            -*) pkgadd_args="$pkgadd_args$1$nl"; shift; ;;
+            '') break; ;;
+            *) [ -d "$1" ] && pkgdirs="$pkgdirs$(readlink -f "$1")$nl" || pkgs="$pkgs$(readlink -f "$1")$nl"; shift; ;;
+        esac
+    done
+
+    if [ $update = 1 ] && [ $auto = 1 ]; then
+        echo "pkgdad: cannot specify both -u/--update and -a/--auto"
+        exit 1
+    fi
+
+    if [ -n "$config" ]; then
+        pkgadd_args="$pkgadd_args-c$nl$(unchroot "$chroot" "$config")$nl"
+    fi
+
+    if [ -n "$root" ]; then
+        pkgadd_args="$pkgadd_args-r$nl$(unchroot "$chroot" "$root")$nl"
+    fi
+
+    if [ -n "$chroot" ]; then
+        chrootcmd=chroot
+    else
+        chrootcmd='sh -c shift;"$@" --'
+    fi
+    
+}
+
+withargs() {
+    ARGS="$1"
+    shift
+    printf "%s" "$ARGS" | tr '\n' '\0' | xargs -0 "$@"
+}
+
+ifthere() {
+    [ -n "$1" ] && {
+        shift
+        "$@"
+    } || true
+}
+
+checkerr() {
+    silent=0
+    if [ "$1" = "-s" ]; then
+        silent=1
+        shift
+    fi
+    
+    if out="$("$@" 2>&1)"; then
+        if [ $silent = 1 ]; then
+            echo "$out"
+        else
+            echo "[OK]"
+            ifthere "$out" withargs "$out$nl" printf "  %s\n"
+        fi
+    else
+        echo "[ERR]" 1>&2
+        ifthere "$out" withargs "$out$nl" printf "  %s\n" 1>&2
+        exit 1
+    fi
+}
+
+parse_args "$@"
+
+findargs="$(printf "%s" "$excluded" | while read -r exclude; do
+    printf "!\n-name\n%s\n" "$exclude"
+done; printf "x")"
+findargs="${findargs%x}"
+
+pkgs="$pkgs$(printf "%s" "$pkgdirs" | while read -r dir; do
+    withargs "$findargs" find "$dir" -type f -name '*#*.pkg.tar.*'
+done; printf "x")"
+pkgs="${pkgs%x}"
+
+printf "%s" "$pkgs" | while read -r pkg; do
+    args="$pkgadd_args"
+
+    printf "pkgdad: %s " "$(basename "$pkg")"
+
+    pkg="$(checkerr -s unchroot "$chroot" "$pkg")"
+
+    if [ "$update" = 1 ]; then
+        printf "update "
+    elif [ "$auto" = 1 ] && prtlbx -r "/$chroot/$root" -i -c "$(basename "${pkg%#*}")"; then
+        args="$args-u$nl"
+        printf "update "
+    else
+        printf "install "
+    fi
+
+    checkerr withargs "$args" $chrootcmd "$chroot" pkgadd "$pkg"
+done
