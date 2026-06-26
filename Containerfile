@@ -1,6 +1,6 @@
 ARG CRUX_VERSION=3.8
 
-FROM ashymad/crux:${CRUX_VERSION}-stage1 AS build
+FROM quay.io/ashymad/crux:${CRUX_VERSION}-stage1 AS build
 
 ENV CRUX_VERSION=${CRUX_VERSION}
 ENV CRUX_REPO=/newroot/media/crux/core
