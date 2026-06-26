@@ -1,0 +1,335 @@
+#!/bin/sh
+
+set -e
+
+error() {
+    printf "prtlbx: %s\n" "$@" 1>&2
+    exit 1
+}
+
+pkg_query() {
+    if ! awk -v p="$1" -v e=1 -v o=1 \
+        '/^$/{if(n==p)exit;o=0}{if(o==1)n=$0;if(o++>1&&n==p){print;e=0}}END{exit e}' \
+        "${pkgdb}"
+    then
+        error "no package found for query '$1'"
+    fi
+}
+
+fn_check() {
+    "$1" "$2" >/dev/null 2>&1
+    if [ $more = 1 ]; then
+        echo "$2"
+    fi
+}
+
+fn_notcheck() {
+    if ( "$1" "$2" >/dev/null 2>&1 ); then
+        exit 1
+    elif [ $more = 1 ]; then
+        echo "$2"
+    fi
+}
+
+pkg_check() {
+    fn_check pkg_query "$1"
+}
+
+pkg_notcheck() {
+    fn_notcheck pkg_query "$1"
+}
+
+pkg_version() {
+    query="$(pkg_query "$1")"
+    echo "$query" | head -1
+}
+
+pkg_files() {
+    query="$(pkg_query "$1")"
+    echo "$query" | tail -n+2
+}
+
+pkg_list() {
+    if [ -n "$1" ]; then
+        error "option -l with -i does not accept an argument"
+    fi
+    awk -v o=1 '/^$/{o=0}{if(o++==1)print}' "${pkgdb}"
+}
+
+pkg_updated() {
+    prt_usable
+
+    if [ $# -eq 0 ]; then
+        foreach pkg_updated $(pkg_list)
+    else
+        src="$(prt_version "$1")"
+        bin="$(pkg_version "$1")"
+        if [ "$src" != "$bin" ]; then
+            if [ "$more" = 1 ]; then
+                printf "%-25s %-15 s%s\n" "$1" "$bin" "$src"
+            else
+                echo "$1"
+            fi
+        fi
+    fi
+}
+
+prt_usable() {
+    if ! [ -d "$(sh -c 'echo $1' -- "$ports"/*)" ]; then
+        error "no port directories present in $ports"
+    fi
+}
+
+pkg_usable() {
+    if ! [ -f "$pkgdb" ]; then
+        error "no package database present at $pkgdb"
+    fi
+}
+
+prt_path() {
+    if echo "$1" | grep -q ".*/.*"; then
+        path="${ports}${1}"
+    else
+        path="${ports}*/${1}"
+    fi
+    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "$path" \
+       | grep "."
+    then
+        error "no package found for query '$1'"
+    fi
+}
+
+prt_check() {
+    fn_check prt_path "$1"
+}
+
+prt_notcheck() {
+    fn_notcheck prt_path "$1"
+}
+
+prt_version() {
+    pkgfile="$(prt_path "$1")/Pkgfile"
+    awk -F= '/^ *version=/{v=$2}/^ *release=/{r=$2}END{print v "-" r}' "$pkgfile"
+}
+
+prt_footprint() {
+    footprint="$(prt_path "$1")/.footprint"
+    cat "$footprint"
+}
+
+pkg_footprint() {
+    files="$(pkg_files $1)"
+    stat -c "%A %U/%G %N" $files | while read -r line; do
+        echo "$line" | xargs printf "%-15s %-15s %s %s %s\n"
+    done
+}
+
+prt_files() {
+    prt_footprint "$1" | awk '{print $3}'
+}
+
+prt_list() {
+    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "${ports}${1:-*}/*" \
+       | sed "s@^${ports}${1:-[^/]*}/@@" \
+       | grep "."
+    then
+        error "no ports exist in the '$1' collection"
+    fi
+}
+
+foreach() {
+    fn="$1"
+    shift
+    if [ $# = 0 ]; then
+        $fn
+    else
+        for arg in "$@"; do
+            $fn "$arg"
+        done
+    fi
+}
+
+prt_rawdeps() {
+    pkgfile="$(prt_path "$1")/Pkgfile"
+    sed -n 's/^# Depends on: //p' "$pkgfile"
+}
+
+prt_deps() {
+    rawdeps="$(prt_rawdeps "$1")"
+    printf "%s\n" $rawdeps 
+}
+
+prt_tsort() {
+    rawdeps="$(prt_rawdeps "$1")"
+    printf "%s $1\n" ${rawdeps:-$1}
+}
+
+argstr() {
+    echo "$*"
+}
+
+depmerge() {
+    printf "%s\n" "$@" $(foreach prt_deps "$@") \
+        | sort \
+        | uniq \
+        | { tee /dev/fd/3 \
+          | [ "$(argstr $(cat -))" != "$*" ]; \
+          } 3>&1
+
+}
+
+prt_alldeps() {
+    if merged="$(depmerge "$@")"; then
+        prt_alldeps $merged
+    else
+        prt_check $merged
+        printf "%s\n" $merged
+    fi
+}
+
+help() {
+    echo "usage: $1 [<opts>] [<mode>] [<arg>...]"
+    echo "  opts:"
+    echo "    -r,  --root <path>          set alternate filesystem root"
+    echo "    -s,  --source               operate on source ports"
+    echo "    -i,  --installed            operate on installed ports"
+    echo "    -m,  --more                 show more output"
+    echo "    -x,  --noexit               do not exit on first failure"
+    echo "  modes with -i or -s:"
+    echo "    -v,  --version <prt>...     print the port version"
+    echo "    -f,  --files <prt>...       print the port files"
+    echo "    -t,  --footprint <prt>...   print the port footprint"
+    echo "    -c,  --check <prt>...       check if the port exists"
+    echo "    -n,  --notcheck <prt>...    check if the port doesn't exist"
+    echo "    -l,  --list                 print all present ports"
+    echo "    -h,  --help                 print help"
+    echo "  modes with -s:"
+    echo "    -p,  --path <prt>...        print path to the port"
+    echo "    -d,  --deps <prt>...        print direct port dependecies"
+    echo "    -o,  --tsort <prt>...       print dependecies in tsort format"
+    echo "    -a,  --alldeps <prt>...     print all port dependecies"
+    echo "    -l,  --list <col>           print all present ports from collection <col>"
+    echo "  modes with -i:"
+    echo "    -u,  --updated <prt>...     print all ports that have updated source"
+}
+
+min() {
+    [ "$1" -lt "$2" ] && echo "$1" || echo "$2"
+}
+
+checkarg() {
+    if [ $# -lt $(( $1 + 3 )) ]; then
+        error "option $3 requires at least $1 arguments"
+    fi
+
+    shift="$(min "$(( $# - 2 ))" "$(( $2 + 1 ))")"
+}
+
+checkerr() {
+    if ! "$@"; then
+        error "fail: $*"
+    fi
+}
+
+setmode() {
+    if [ -n "$mode" ]; then
+        error "mode already set to '$mode', can't change to '$1'"
+    fi
+
+    mode="$1"
+}
+
+wasseen() {
+    if [ -z "$seen" ]; then
+        seen="$1"
+        return 1
+    fi
+
+    [ "$seen" = "$1" ]
+}
+
+splitopt() {
+    echo "$1" \
+        | cut -c2- \
+        | sed 's/\(.\)/-\1 /g' \
+        | { tee /dev/fd/3 \
+          | shift="$(awk '{print NF}')"; \
+          } 3>&1
+}
+
+saveerr() {
+    if ! ( "$@" ); then
+        lasterr=1
+    fi
+}
+
+mode=""
+root="/"
+source=0
+installed=0
+seen=""
+more=0
+stdin=0
+noexit=0
+lasterr=0
+
+while :; do
+    case $1 in
+        -r|--root)      checkarg 1 1 "$@";
+                        root="$(checkerr readlink -f "$2")/";
+                        shift $shift ;;
+        -s|--source)    source=1;          shift ;;
+        -i|--installed) installed=1;       shift ;;
+        -m|--more)      more=1;            shift ;;
+        -x|--noexit)    noexit=1;          shift ;;
+        -)              stdin=1;           shift ;;
+        -v|--version)   setmode version;   shift ;;
+        -f|--files)     setmode files;     shift ;;
+        -t|--footprint) setmode footprint; shift ;;
+        -l|--list)      setmode list;      shift ;;
+        -p|--path)      setmode path;      shift ;;
+        -c|--check)     setmode check;     shift ;;
+        -n|--notcheck)  setmode notcheck;  shift ;;
+        -d|--deps)      setmode deps;      shift ;;
+        -a|--alldeps)   setmode alldeps;   shift ;;
+        -o|--tsort)     setmode tsort;     shift ;;
+        -u|--updated)   setmode updated;   shift ;;
+        -h|--help)      help "$0"; exit 0; ;;
+        -?|--*)         error "unknown option '$1', see $0 --help" ;;
+        -*)             splat="$(splitopt "$1")"; shift $shift; set -- $splat "$@";;
+        '')             break; ;;
+        *)              wasseen "$1" && break || set -- "$@" "$1" && shift ;;
+    esac
+done
+
+if [ -z "$mode" ]; then
+    error "no mode selected, see $0 --help"
+fi
+
+if [ $source = 0 ] && [ $installed = 0 ]; then
+    error "either -s or -i has to be set, see $0 --help"
+fi
+
+[ $source = 1 ] && prefix=prt || prefix=pkg
+
+if ! type ${prefix}_${mode} >/dev/null 2>&1; then
+    [ $source = 1 ] && wrong="-s" || wrong="-i"
+    error "mode '${mode}' is not supported with '$wrong', see $0 --help"
+fi
+
+[ $noexit = 1 ] && wrapper=saveerr
+
+ports="${root}usr/ports/"
+pkgdb="${root}var/lib/pkg/db"
+
+${prefix}_usable
+
+foreach "${wrapper} ${prefix}_${mode}" "$@"
+
+if [ $stdin = 1 ]; then
+    while read -r arg; do
+        ${wrapper} ${prefix}_${mode} "$arg"
+    done
+fi
+
+exit $lasterr
