@@ -16,27 +16,8 @@ pkg_query() {
     fi
 }
 
-fn_check() {
-    "$1" "$2" >/dev/null 2>&1
-    if [ $more = 1 ]; then
-        echo "$2"
-    fi
-}
-
-fn_notcheck() {
-    if ( "$1" "$2" >/dev/null 2>&1 ); then
-        exit 1
-    elif [ $more = 1 ]; then
-        echo "$2"
-    fi
-}
-
 pkg_check() {
-    fn_check pkg_query "$1"
-}
-
-pkg_notcheck() {
-    fn_notcheck pkg_query "$1"
+    pkg_query "$1" >/dev/null 2>&1
 }
 
 pkg_version() {
@@ -50,28 +31,10 @@ pkg_files() {
 }
 
 pkg_list() {
-    if [ -n "$1" ]; then
+    if [ -n "$1" ] && [ "$1" != "*" ]; then
         error "option -l with -i does not accept an argument"
     fi
     awk -v o=1 '/^$/{o=0}{if(o++==1)print}' "${pkgdb}"
-}
-
-pkg_updated() {
-    prt_usable
-
-    if [ $# -eq 0 ]; then
-        foreach pkg_updated $(pkg_list)
-    else
-        src="$(prt_version "$1")"
-        bin="$(pkg_version "$1")"
-        if [ "$src" != "$bin" ]; then
-            if [ "$more" = 1 ]; then
-                printf "%-25s %-15 s%s\n" "$1" "$bin" "$src"
-            else
-                echo "$1"
-            fi
-        fi
-    fi
 }
 
 prt_usable() {
@@ -92,19 +55,15 @@ prt_path() {
     else
         path="${ports}*/${1}"
     fi
-    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "$path" \
-       | grep "."
+    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "$path" -print -quit \
+        | grep "."
     then
         error "no package found for query '$1'"
     fi
 }
 
 prt_check() {
-    fn_check prt_path "$1"
-}
-
-prt_notcheck() {
-    fn_notcheck prt_path "$1"
+    prt_path "$1" >/dev/null 2>&1
 }
 
 prt_version() {
@@ -129,24 +88,24 @@ prt_files() {
 }
 
 prt_list() {
-    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "${ports}${1:-*}/*" \
-       | sed "s@^${ports}${1:-[^/]*}/@@" \
-       | grep "."
-    then
-        error "no ports exist in the '$1' collection"
+    if echo "$1" | grep -q ".*/.*"; then
+        path="${1}"
+    else
+        path="${1}/*"
     fi
+    find "${ports}" \
+        -mindepth 2 -maxdepth 2 -type d \
+        -path "${ports}${path}" -printf "%P\n" \
+       | cut -d'/' -f2 \
+       | grep "."
 }
 
 foreach() {
     fn="$1"
     shift
-    if [ $# = 0 ]; then
-        $fn
-    else
-        for arg in "$@"; do
-            $fn "$arg"
-        done
-    fi
+    for arg in "$@"; do
+        $fn "$arg"
+    done
 }
 
 prt_rawdeps() {
@@ -161,7 +120,7 @@ prt_deps() {
 
 prt_tsort() {
     rawdeps="$(prt_rawdeps "$1")"
-    printf "%s $1\n" ${rawdeps:-$1}
+    printf "%s $1\n" ${rawdeps} "$1"
 }
 
 argstr() {
@@ -187,32 +146,6 @@ prt_alldeps() {
     fi
 }
 
-help() {
-    echo "usage: $1 [<opts>] [<mode>] [<arg>...]"
-    echo "  opts:"
-    echo "    -r,  --root <path>          set alternate filesystem root"
-    echo "    -s,  --source               operate on source ports"
-    echo "    -i,  --installed            operate on installed ports"
-    echo "    -m,  --more                 show more output"
-    echo "    -x,  --noexit               do not exit on first failure"
-    echo "  modes with -i or -s:"
-    echo "    -v,  --version <prt>...     print the port version"
-    echo "    -f,  --files <prt>...       print the port files"
-    echo "    -t,  --footprint <prt>...   print the port footprint"
-    echo "    -c,  --check <prt>...       check if the port exists"
-    echo "    -n,  --notcheck <prt>...    check if the port doesn't exist"
-    echo "    -l,  --list                 print all present ports"
-    echo "    -h,  --help                 print help"
-    echo "  modes with -s:"
-    echo "    -p,  --path <prt>...        print path to the port"
-    echo "    -d,  --deps <prt>...        print direct port dependecies"
-    echo "    -o,  --tsort <prt>...       print dependecies in tsort format"
-    echo "    -a,  --alldeps <prt>...     print all port dependecies"
-    echo "    -l,  --list <col>           print all present ports from collection <col>"
-    echo "  modes with -i:"
-    echo "    -u,  --updated <prt>...     print all ports that have updated source"
-}
-
 min() {
     [ "$1" -lt "$2" ] && echo "$1" || echo "$2"
 }
@@ -231,12 +164,12 @@ checkerr() {
     fi
 }
 
-setmode() {
-    if [ -n "$mode" ]; then
-        error "mode already set to '$mode', can't change to '$1'"
+setquery() {
+    if [ -n "$query" ]; then
+        error "query already set to '$query', can't change to '$1'"
     fi
 
-    mode="$1"
+    query="$1"
 }
 
 wasseen() {
@@ -257,20 +190,60 @@ splitopt() {
           } 3>&1
 }
 
-saveerr() {
-    if ! ( "$@" ); then
+wrap() {
+    retcode=1
+    if out="$( "$@" )"; then
+        retcode=0
+    fi
+    shift
+
+    if [ $retcode = $negate ]; then
+        if [ $more = 1 ] ; then
+            printf "%s " "$@" "$out"
+            printf "\n"
+        elif [ -n "$out" ]; then
+            printf "%s\n" "$out"
+        fi
+    elif [ $noexit = 1 ]; then
         lasterr=1
+    else
+        exit 1
     fi
 }
 
-mode=""
+help() {
+    echo "usage: $1 [<opt>] <tgt> <qry> [<arg>...]"
+    echo "  options:"
+    echo "    -r,  --root <path>          set alternate filesystem root"
+    echo "    -x,  --noexit               do not exit on first failure"
+    echo "    -m,  --more                 append to the input instead of replacing it"
+    echo "    -n,  --negate               negate the output"
+    echo "  targets:"
+    echo "    -s,  --source               operate on source ports"
+    echo "    -i,  --installed            operate on installed ports"
+    echo "  universal queries:"
+    echo "    -v,  --version <prt>...     print the port version"
+    echo "    -f,  --files <prt>...       print the port files"
+    echo "    -t,  --footprint <prt>...   print the port footprint"
+    echo "    -c,  --check <prt>...       check if the port exists"
+    echo "    -l,  --list                 print all present ports"
+    echo "    -h,  --help                 print help"
+    echo "  source queries:"
+    echo "    -p,  --path <prt>...        print path to the port"
+    echo "    -d,  --deps <prt>...        print direct port dependecies"
+    echo "    -o,  --tsort <prt>...       print dependecies in tsort format"
+    echo "    -a,  --alldeps <prt>...     print all port dependecies"
+    echo "    -l,  --list <col>           print all present ports from collection <col>, can glob"
+}
+
 root="/"
-source=0
-installed=0
-seen=""
-more=0
-stdin=0
 noexit=0
+more=0
+negate=0
+stdin=0
+seen=""
+query=""
+target=""
 lasterr=0
 
 while :; do
@@ -278,22 +251,21 @@ while :; do
         -r|--root)      checkarg 1 1 "$@";
                         root="$(checkerr readlink -f "$2")/";
                         shift $shift ;;
-        -s|--source)    source=1;          shift ;;
-        -i|--installed) installed=1;       shift ;;
-        -m|--more)      more=1;            shift ;;
-        -x|--noexit)    noexit=1;          shift ;;
-        -)              stdin=1;           shift ;;
-        -v|--version)   setmode version;   shift ;;
-        -f|--files)     setmode files;     shift ;;
-        -t|--footprint) setmode footprint; shift ;;
-        -l|--list)      setmode list;      shift ;;
-        -p|--path)      setmode path;      shift ;;
-        -c|--check)     setmode check;     shift ;;
-        -n|--notcheck)  setmode notcheck;  shift ;;
-        -d|--deps)      setmode deps;      shift ;;
-        -a|--alldeps)   setmode alldeps;   shift ;;
-        -o|--tsort)     setmode tsort;     shift ;;
-        -u|--updated)   setmode updated;   shift ;;
+        -s|--source)    target=s;           shift ;;
+        -i|--installed) target=i;           shift ;;
+        -m|--more)      more=1;             shift ;;
+        -n|--negate)    negate=1;           shift ;;
+        -x|--noexit)    noexit=1;           shift ;;
+        -)              stdin=1;            shift ;;
+        -v|--version)   setquery version;   shift ;;
+        -f|--files)     setquery files;     shift ;;
+        -t|--footprint) setquery footprint; shift ;;
+        -l|--list)      setquery list;      shift ;;
+        -p|--path)      setquery path;      shift ;;
+        -c|--check)     setquery check;     shift ;;
+        -d|--deps)      setquery deps;      shift ;;
+        -a|--alldeps)   setquery alldeps;   shift ;;
+        -o|--tsort)     setquery tsort;     shift ;;
         -h|--help)      help "$0"; exit 0; ;;
         -?|--*)         error "unknown option '$1', see $0 --help" ;;
         -*)             splat="$(splitopt "$1")"; shift $shift; set -- $splat "$@";;
@@ -302,33 +274,34 @@ while :; do
     esac
 done
 
-if [ -z "$mode" ]; then
-    error "no mode selected, see $0 --help"
+if [ -z "$query" ]; then
+    error "no query selected, see $0 --help"
 fi
 
-if [ $source = 0 ] && [ $installed = 0 ]; then
-    error "either -s or -i has to be set, see $0 --help"
+if [ -z "$target" ]; then
+    error "no target selected, see $0 --help"
 fi
 
-[ $source = 1 ] && prefix=prt || prefix=pkg
+[ $target = s ] && prefix=prt || prefix=pkg
 
-if ! type ${prefix}_${mode} >/dev/null 2>&1; then
-    [ $source = 1 ] && wrong="-s" || wrong="-i"
-    error "mode '${mode}' is not supported with '$wrong', see $0 --help"
+if ! type ${prefix}_${query} >/dev/null 2>&1; then
+    error "query '${query}' is not supported with target '$target', see $0 --help"
 fi
 
-[ $noexit = 1 ] && wrapper=saveerr
+if [ $query = "list" ] && [ $# -eq 0 ]; then
+    set -- "*"
+fi
 
 ports="${root}usr/ports/"
 pkgdb="${root}var/lib/pkg/db"
 
 ${prefix}_usable
 
-foreach "${wrapper} ${prefix}_${mode}" "$@"
+foreach "wrap ${prefix}_${query}" "$@"
 
-if [ $stdin = 1 ]; then
+if [ $# = 0 ] || [ $stdin = 1 ]; then
     while read -r arg; do
-        ${wrapper} ${prefix}_${mode} "$arg"
+        wrap ${prefix}_${query} $arg
     done
 fi
 
