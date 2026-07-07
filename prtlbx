@@ -8,12 +8,7 @@ error() {
 }
 
 pkg_query() {
-    if ! awk -v p="$1" -v e=1 -v o=1 \
-        '/^$/{if(n==p)exit;o=0}{if(o==1)n=$0;if(o++>1&&n==p){print;e=0}}END{exit e}' \
-        "${pkgdb}"
-    then
-        error "no package found for query '$1'"
-    fi
+    sed -n '/^'"$1"'$/,/^$/p' "${pkgdb}" | grep -v '^$'
 }
 
 pkg_check() {
@@ -21,13 +16,11 @@ pkg_check() {
 }
 
 pkg_version() {
-    query="$(pkg_query "$1")"
-    echo "$query" | head -1
+    pkg_query "$1" | sed -n '2p' | grep .
 }
 
 pkg_files() {
-    query="$(pkg_query "$1")"
-    echo "$query" | tail -n+2
+    pkg_query "$1" | tail -n+3 | grep .
 }
 
 pkg_list() {
@@ -55,11 +48,7 @@ prt_path() {
     else
         path="${ports}*/${1}"
     fi
-    if ! find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "$path" -print -quit \
-        | grep "."
-    then
-        error "no package found for query '$1'"
-    fi
+    find "${ports}" -mindepth 2 -maxdepth 2 -type d -path "$path" -print -quit  | grep .
 }
 
 prt_check() {
@@ -78,7 +67,7 @@ prt_footprint() {
 
 pkg_footprint() {
     files="$(pkg_files $1)"
-    stat -c "%A %U/%G %N" $files | while read -r line; do
+    env -C / stat -c "%A %U/%G %N" $files | while read -r line; do
         echo "$line" | xargs printf "%-15s %-15s %s %s %s\n"
     done
 }
@@ -108,19 +97,11 @@ foreach() {
     done
 }
 
-prt_rawdeps() {
-    pkgfile="$(prt_path "$1")/Pkgfile"
-    sed -n 's/^# Depends on: //p' "$pkgfile"
-}
 
 prt_deps() {
-    rawdeps="$(prt_rawdeps "$1")"
-    printf "%s\n" $rawdeps 
-}
-
-prt_tsort() {
-    rawdeps="$(prt_rawdeps "$1")"
-    printf "%s $1\n" ${rawdeps} "$1"
+    pkgfile="$(prt_path "$1")/Pkgfile"
+    rawdeps="$(sed -n 's/^# Depends on: //p' "$pkgfile")"
+    printf "%s\n" "$1" $rawdeps 
 }
 
 argstr() {
@@ -198,9 +179,8 @@ wrap() {
     shift
 
     if [ $retcode = $negate ]; then
-        if [ $more = 1 ] ; then
-            printf "%s " "$@" "$out"
-            printf "\n"
+        if [ $more = 1 ]; then
+            printf "$* %s\n" $out
         elif [ -n "$out" ]; then
             printf "%s\n" "$out"
         fi
@@ -231,7 +211,6 @@ help() {
     echo "  source queries:"
     echo "    -p,  --path <prt>...        print path to the port"
     echo "    -d,  --deps <prt>...        print direct port dependecies"
-    echo "    -o,  --tsort <prt>...       print dependecies in tsort format"
     echo "    -a,  --alldeps <prt>...     print all port dependecies"
     echo "    -l,  --list <col>           print all present ports from collection <col>, can glob"
 }
@@ -265,7 +244,6 @@ while :; do
         -c|--check)     setquery check;     shift ;;
         -d|--deps)      setquery deps;      shift ;;
         -a|--alldeps)   setquery alldeps;   shift ;;
-        -o|--tsort)     setquery tsort;     shift ;;
         -h|--help)      help "$0"; exit 0; ;;
         -?|--*)         error "unknown option '$1', see $0 --help" ;;
         -*)             splat="$(splitopt "$1")"; shift $shift; set -- $splat "$@";;
