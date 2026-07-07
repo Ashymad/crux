@@ -17,4 +17,4 @@ jobs:
         with:
           file: ./Containerfile
           push: true
-          tags: ghcr.io/Ashymad/crux:${{ steps.extract_branch.outputs.branch }}
+          tags: ghcr.io/ashymad/crux:${{ steps.extract_branch.outputs.branch }}
